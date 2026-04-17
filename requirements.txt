@@ -1,0 +1,6 @@
+# ScanScribe Client Requirements
+requests==2.31.0
+watchdog==5.0.3
+pyyaml==6.0.2  # Optional, for fetching server config
+colorama==0.4.6  # Windows console color support
+mutagen==1.47.0  # Audio duration for rejection filters
