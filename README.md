@@ -38,5 +38,3 @@ See [requirements.txt](requirements.txt). Python 3 is required for development; 
 - `scanscribe_client_console.py` — main application
 - `ScanScribe-Client.spec` — PyInstaller spec for one-file console EXE
 - `build-wine.sh` — automated Wine build on Linux
-
-Build artifacts (`build/`, `dist/`) are ignored by Git; clone clean and build locally.
