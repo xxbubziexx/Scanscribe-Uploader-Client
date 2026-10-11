@@ -23,9 +23,10 @@ pip install -r requirements.txt
 if errorlevel 1 exit /b 1
 
 echo.
-echo Done. In this window the venv is active. Next:
-echo   python scanscribe_client_console.py --setup
-echo   python scanscribe_client_console.py
+echo Done! In this window the venv is active. Next steps:
+echo   python scanscribe_client_console.py --setup   (Run initial setup wizard)
+echo   python scanscribe_client_console.py --test    (Test connection to server)
+echo   python scanscribe_client_console.py           (Start interactive uploader)
 echo.
 echo In a new Command Prompt: cd to this folder, then run .venv\Scripts\activate.bat
 echo.

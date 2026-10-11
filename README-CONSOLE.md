@@ -16,23 +16,38 @@ python scanscribe_client_console.py
 
 ## Usage
 
-### Interactive Setup
+### Interactive Setup Wizard
 ```bash
 python scanscribe_client_console.py --setup
 ```
 Prompts for:
-- Server URL
+- Server URL (e.g., `http://192.168.1.100:8000`)
 - Username
-- Password
-- Watch folder
+- Password (validates live with server)
+- Local scanner watch folder (e.g., `C:\ProScan\Recordings` or `C:\SDRTrunk\recordings`)
+- Automatic file deletion toggle
+
+### Test Server Connection & Pipeline
+```bash
+python scanscribe_client_console.py --test
+```
+Performs a fast end-to-end diagnostic:
+- Tests network latency & reachability to the ScanScribe server
+- Validates configured credentials
+- Queries `/api/upload/status` to confirm the upload pipeline is online, displays remote ingest directory, and lists allowed audio formats
 
 ### Command Line Arguments
 ```bash
 python scanscribe_client_console.py \
-  --server http://192.168.10.120:8000 \
-  --username john \
+  --server http://192.168.1.100:8000 \
+  --username admin \
   --password secret123 \
-  --folder "C:\Audio\Recordings"
+  --folder "C:\ProScan\Recordings"
+```
+
+### Headless / Background Operation (Non-Interactive)
+```bash
+python scanscribe_client_console.py --no-interactive
 ```
 
 ### Using Config File
@@ -60,9 +75,14 @@ dist/ScanScribe-Client.exe
 
 ## Running the EXE
 
-### First Time
+### First Time Setup Wizard
 ```cmd
 ScanScribe-Client.exe --setup
+```
+
+### Test Connection
+```cmd
+ScanScribe-Client.exe --test
 ```
 
 ### Normal Operation
@@ -72,7 +92,7 @@ ScanScribe-Client.exe
 
 ### With Arguments
 ```cmd
-ScanScribe-Client.exe --server http://192.168.10.120:8000 -u john -p secret123
+ScanScribe-Client.exe --server http://192.168.1.100:8000 -u admin -p secret123
 ```
 
 ---

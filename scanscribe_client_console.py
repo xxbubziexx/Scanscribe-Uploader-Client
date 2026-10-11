@@ -9,11 +9,14 @@ import time
 import json
 import signal
 import argparse
+import getpass
 from pathlib import Path
 from datetime import datetime
 import requests
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+
+__version__ = "2.0.0"
 
 try:
     import yaml
@@ -28,20 +31,32 @@ except ImportError:
     mutagen = None
     MUTAGEN_AVAILABLE = False
 
-# Enable ANSI colors on Windows
+# Enable UTF-8 encoding and ANSI colors on Windows
+if sys.platform == 'win32':
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleOutputCP(65001)
+        kernel32.SetConsoleCP(65001)
+        kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+    except Exception:
+        pass
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+    if hasattr(sys.stderr, 'reconfigure'):
+        try:
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+
 try:
     import colorama
     colorama.init()
 except ImportError:
-    # colorama not installed, try Windows-specific fix
-    if sys.platform == 'win32':
-        # Enable ANSI escape sequences on Windows 10+
-        try:
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
-        except:
-            pass
+    pass
 
 # ANSI color codes
 class Colors:
@@ -56,7 +71,7 @@ class Colors:
 
 # Default configuration
 DEFAULT_CONFIG = {
-    "server_url": "http://192.168.10.120:8000",
+    "server_url": "http://localhost:8000",
     "username": "",
     "password": "",
     "watch_folder": str(Path.home() / "ScanScribe-Ingest"),
@@ -85,17 +100,119 @@ class ScanScribeClient:
         }
         
     def load_config(self):
-        """Load configuration from file."""
+        """Load configuration from file, merged with defaults."""
+        cfg = DEFAULT_CONFIG.copy()
         if self.config_path.exists():
-            with open(self.config_path, 'r') as f:
-                return json.load(f)
-        return DEFAULT_CONFIG.copy()
+            try:
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    saved = json.load(f)
+                    if isinstance(saved, dict):
+                        cfg.update(saved)
+            except Exception as e:
+                print(f"{Colors.YELLOW}⚠️  Warning reading {self.config_path}: {e}{Colors.RESET}")
+        return cfg
     
     def save_config(self):
         """Save configuration to file."""
-        with open(self.config_path, 'w') as f:
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.config_path, 'w', encoding='utf-8') as f:
             json.dump(self.config, f, indent=2)
         print(f"{Colors.GRAY}📝 Config saved to {self.config_path}{Colors.RESET}")
+
+    def test_connection(self, verbose=True) -> bool:
+        """Test reachability and authentication to ScanScribe server."""
+        server_url = (self.config.get("server_url") or "http://localhost:8000").rstrip("/")
+        username = (self.config.get("username") or "").strip()
+        password = self.config.get("password") or ""
+
+        if verbose:
+            print(f"\n{Colors.BOLD}{Colors.CYAN}═══ ScanScribe Server Connection Diagnostic ═══{Colors.RESET}")
+            print(f"  Target Server: {Colors.CYAN}{server_url}{Colors.RESET}")
+            print(f"  Configured User: {Colors.CYAN}{username or '(none)'}{Colors.RESET}")
+
+        # 1. Reachability check
+        t0 = time.time()
+        reach_ok = False
+        for endpoint in ["/health", "/api/upload/status", "/"]:
+            try:
+                resp = requests.get(f"{server_url}{endpoint}", timeout=5)
+                reach_ok = True
+                break
+            except requests.exceptions.RequestException:
+                continue
+
+        latency_ms = (time.time() - t0) * 1000
+
+        if not reach_ok:
+            if verbose:
+                print(f"  {Colors.RED}✗{Colors.RESET} Network Reachability: {Colors.RED}FAILED{Colors.RESET}")
+                print(f"    {Colors.RED}Cannot connect to server at {server_url}{Colors.RESET}")
+                print(f"    {Colors.YELLOW}Hint: Verify that ScanScribe is running (`scanscribe status`) and that network firewalls allow traffic on this port.{Colors.RESET}\n")
+            return False
+
+        if verbose:
+            print(f"  {Colors.GREEN}✓{Colors.RESET} Network Reachability: {Colors.GREEN}OK{Colors.RESET} ({latency_ms:.1f}ms latency)")
+
+        # 2. Authentication check
+        if not username or not password:
+            if verbose:
+                print(f"  {Colors.YELLOW}!{Colors.RESET} Authentication: {Colors.YELLOW}SKIPPED (no credentials configured){Colors.RESET}")
+                print(f"    {Colors.YELLOW}Run with `--setup` to configure username and password.{Colors.RESET}\n")
+            return False
+
+        try:
+            auth_resp = requests.post(
+                f"{server_url}/api/auth/login",
+                data={"username": username, "password": password},
+                timeout=10
+            )
+            if auth_resp.status_code == 200:
+                data = auth_resp.json()
+                self.token = data.get("access_token")
+                if verbose:
+                    print(f"  {Colors.GREEN}✓{Colors.RESET} Authentication: {Colors.GREEN}OK{Colors.RESET} (authenticated as '{username}')")
+            else:
+                detail = "Invalid credentials"
+                try:
+                    detail = auth_resp.json().get("detail", detail)
+                except Exception:
+                    pass
+                if verbose:
+                    print(f"  {Colors.RED}✗{Colors.RESET} Authentication: {Colors.RED}FAILED{Colors.RESET} (HTTP {auth_resp.status_code})")
+                    print(f"    {Colors.RED}Reason: {detail}{Colors.RESET}\n")
+                return False
+        except Exception as e:
+            if verbose:
+                print(f"  {Colors.RED}✗{Colors.RESET} Authentication error: {Colors.RED}{str(e)}{Colors.RESET}\n")
+            return False
+
+        # 3. Upload endpoint status
+        try:
+            status_resp = requests.get(
+                f"{server_url}/api/upload/status",
+                headers={"Authorization": f"Bearer {self.token}"},
+                timeout=10
+            )
+            if status_resp.status_code == 200:
+                sdata = status_resp.json()
+                server_ver = sdata.get("server_version", "unknown")
+                ingest_dir = sdata.get("ingest_directory", "unknown")
+                allowed_ext = sdata.get("allowed_extensions", [".wav", ".mp3"])
+                if verbose:
+                    print(f"  {Colors.GREEN}✓{Colors.RESET} Upload Pipeline: {Colors.GREEN}ONLINE{Colors.RESET}")
+                    print(f"    - Server Version:    {Colors.CYAN}{server_ver}{Colors.RESET}")
+                    print(f"    - Remote Ingest Dir: {Colors.CYAN}{ingest_dir}{Colors.RESET}")
+                    print(f"    - Allowed Formats:   {Colors.CYAN}{', '.join(allowed_ext)}{Colors.RESET}")
+                    print(f"\n{Colors.GREEN}✅ Connection test successful! Scanner audio can be uploaded to this server.{Colors.RESET}\n")
+                return True
+            else:
+                if verbose:
+                    print(f"  {Colors.YELLOW}!{Colors.RESET} Upload status check returned HTTP {status_resp.status_code}")
+                return True
+        except Exception as e:
+            if verbose:
+                print(f"  {Colors.YELLOW}!{Colors.RESET} Could not retrieve /api/upload/status: {str(e)}")
+            return True
     
     def log(self, message, level="info"):
         """Print colored log message."""
@@ -611,18 +728,33 @@ class AudioFileHandler(FileSystemEventHandler):
             self.processing.discard(str(file_path))
 
 
+def prompt_password(prompt_text="Password: "):
+    """Safely prompt for password with fallback if masked input fails."""
+    try:
+        pw = getpass.getpass(prompt_text).strip()
+        if pw:
+            return pw
+    except Exception:
+        pass
+    return input(prompt_text).strip()
+
+
 def interactive_login(client):
     """Interactive login prompt."""
     print(f"\n{Colors.BOLD}═══ ScanScribe Server Configuration ═══{Colors.RESET}\n")
     
     # Server URL is FIRST
     print(f"{Colors.BOLD}Step 1: Server URL{Colors.RESET}")
-    server = input(f"Enter server URL [{client.config['server_url']}]: ").strip() or client.config['server_url']
+    default_server = client.config.get('server_url') or "http://localhost:8000"
+    server = input(f"Enter server URL [{default_server}]: ").strip() or default_server
+    server = server.rstrip("/")
+    if not server.startswith("http://") and not server.startswith("https://"):
+        server = f"http://{server}"
     client.config['server_url'] = server
     
     print(f"\n{Colors.BOLD}Step 2: Login Credentials{Colors.RESET}")
     username = input("Username: ").strip()
-    password = input("Password: ").strip()
+    password = prompt_password("Password: ")
     
     print()  # Blank line
     
@@ -633,6 +765,102 @@ def interactive_login(client):
         return True
     
     return False
+
+
+def interactive_setup(client):
+    """Full interactive configuration setup wizard."""
+    print(f"\n{Colors.BOLD}{Colors.CYAN}╔═══════════════════════════════════════════════════════════════╗{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.CYAN}║              ScanScribe Uploader Setup Wizard                 ║{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.CYAN}╚═══════════════════════════════════════════════════════════════╝{Colors.RESET}")
+    print(f"{Colors.GRAY}Configure this workstation to watch local scanner audio folders{Colors.RESET}")
+    print(f"{Colors.GRAY}and forward recordings to your central ScanScribe server.{Colors.RESET}\n")
+
+    # Step 1: Server URL
+    print(f"{Colors.BOLD}Step 1: ScanScribe Server Address{Colors.RESET}")
+    current_server = client.config.get("server_url") or "http://localhost:8000"
+    server_input = input(f"Enter ScanScribe server URL [{current_server}]: ").strip()
+    server_url = (server_input or current_server).rstrip("/")
+    if not server_url.startswith("http://") and not server_url.startswith("https://"):
+        server_url = f"http://{server_url}"
+    client.config["server_url"] = server_url
+    print(f"-> Target server: {Colors.CYAN}{server_url}{Colors.RESET}\n")
+
+    # Step 2: Credentials
+    print(f"{Colors.BOLD}Step 2: Authentication Credentials{Colors.RESET}")
+    current_user = client.config.get("username", "")
+    username_prompt = f"Username [{current_user}]: " if current_user else "Username: "
+    username_input = input(username_prompt).strip()
+    username = username_input or current_user
+
+    while not username:
+        username = input("Username (required): ").strip()
+
+    password = prompt_password(f"Password for '{username}': ")
+
+    # Verify credentials immediately
+    print(f"{Colors.GRAY}Verifying credentials with server...{Colors.RESET}")
+    if client.login(username, password, silent=False):
+        client.config["username"] = username
+        client.config["password"] = password
+    else:
+        print(f"{Colors.YELLOW}⚠️  Authentication could not be verified right now.{Colors.RESET}")
+        save_anyway = input("Save these credentials anyway? (y/N): ").strip().lower()
+        if save_anyway == 'y':
+            client.config["username"] = username
+            client.config["password"] = password
+        else:
+            print(f"{Colors.RED}Setup aborted. Run `--setup` again to re-configure.{Colors.RESET}\n")
+            return False
+    print()
+
+    # Step 3: Watch Folder
+    print(f"{Colors.BOLD}Step 3: Scanner Audio Watch Folder{Colors.RESET}")
+    print(f"{Colors.GRAY}Path where your scanner software (ProScan, SDRTrunk) saves recordings.{Colors.RESET}")
+    current_folder = client.config.get("watch_folder") or str(Path.home() / "ScanScribe-Ingest")
+    folder_input = input(f"Watch folder [{current_folder}]: ").strip()
+    watch_folder = folder_input or current_folder
+    watch_path = Path(watch_folder)
+
+    if not watch_path.exists():
+        create_choice = input(f"Folder '{watch_path}' does not exist. Create it now? (Y/n): ").strip().lower()
+        if create_choice != 'n':
+            try:
+                watch_path.mkdir(parents=True, exist_ok=True)
+                print(f"{Colors.GREEN}✓ Folder created: {watch_path}{Colors.RESET}")
+            except Exception as e:
+                print(f"{Colors.RED}⚠️ Failed to create folder: {e}{Colors.RESET}")
+    client.config["watch_folder"] = str(watch_path)
+    print()
+
+    # Step 4: Delete local file after upload
+    print(f"{Colors.BOLD}Step 4: Local Storage Cleanup{Colors.RESET}")
+    current_del = client.config.get("delete_after_upload", True)
+    del_default = "Y" if current_del else "N"
+    del_input = input(f"Delete local audio files after successful upload? (Y/N) [{del_default}]: ").strip().upper()
+    if del_input == "N" or del_input == "NO":
+        client.config["delete_after_upload"] = False
+        print(f"-> Local recordings will be {Colors.YELLOW}KEPT{Colors.RESET} after upload.\n")
+    else:
+        client.config["delete_after_upload"] = True
+        print(f"-> Local recordings will be {Colors.GREEN}DELETED{Colors.RESET} after upload (saves disk space).\n")
+
+    # Save
+    client.save_config()
+
+    # Run quick diagnostic test
+    print(f"{Colors.BOLD}Step 5: Testing Connectivity{Colors.RESET}")
+    client.test_connection(verbose=True)
+
+    print(f"{Colors.GREEN}{Colors.BOLD}🎉 Setup complete!{Colors.RESET}")
+    print(f"You can now run the uploader anytime with:\n")
+    print(f"  {Colors.CYAN}python scanscribe_client_console.py{Colors.RESET}                 (interactive menu)")
+    print(f"  {Colors.CYAN}python scanscribe_client_console.py --no-interactive{Colors.RESET} (headless / background)\n")
+
+    start_now = input("Start watching for audio files now? (Y/n): ").strip().lower()
+    if start_now != 'n':
+        print(f"\n{Colors.CYAN}Starting watcher...{Colors.RESET}")
+        start_watching_interactive(client)
+    return True
 
 
 def interactive_menu(client):
@@ -650,8 +878,10 @@ def interactive_menu(client):
         print(f"  {Colors.CYAN}4{Colors.RESET}. Toggle delete after upload {Colors.GRAY}[{'ON' if client.config.get('delete_after_upload', True) else 'OFF'}]{Colors.RESET}")
         print(f"  {Colors.CYAN}5{Colors.RESET}. View statistics")
         print(f"  {Colors.CYAN}6{Colors.RESET}. View config")
-        print(f"  {Colors.CYAN}7{Colors.RESET}. Logout")
-        print(f"  {Colors.CYAN}8{Colors.RESET}. Exit")
+        print(f"  {Colors.CYAN}7{Colors.RESET}. Test server connection")
+        print(f"  {Colors.CYAN}8{Colors.RESET}. Run full setup wizard")
+        print(f"  {Colors.CYAN}9{Colors.RESET}. Logout")
+        print(f"  {Colors.CYAN}0{Colors.RESET}. Exit")
         
         choice = input(f"\n{Colors.BOLD}>{Colors.RESET} ").strip()
         
@@ -668,10 +898,14 @@ def interactive_menu(client):
         elif choice == "6":
             view_config(client)
         elif choice == "7":
+            client.test_connection(verbose=True)
+        elif choice == "8":
+            interactive_setup(client)
+        elif choice == "9":
             client.token = None
             print(f"\n{Colors.YELLOW}👋 Logged out{Colors.RESET}\n")
             break
-        elif choice == "8":
+        elif choice == "0" or choice.lower() == "exit":
             if client.running:
                 client.stop_watching()
             print(f"\n{Colors.CYAN}👋 Goodbye!{Colors.RESET}\n")
@@ -741,6 +975,9 @@ def change_server(client):
     new_server = input(f"New server URL (or press Enter to keep current): ").strip()
     
     if new_server:
+        new_server = new_server.rstrip("/")
+        if not new_server.startswith("http://") and not new_server.startswith("https://"):
+            new_server = f"http://{new_server}"
         client.config['server_url'] = new_server
         client.token = None  # Invalidate current token
         client.save_config()
@@ -788,25 +1025,45 @@ def view_config(client):
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="ScanScribe Client - Upload audio files to ScanScribe server"
+        description="ScanScribe Uploader - Watch scanner audio folders and forward to ScanScribe server"
     )
-    parser.add_argument("--server", help="Server URL (e.g., http://192.168.10.120:8000)")
+    parser.add_argument("--setup", action="store_true", help="Run interactive configuration setup wizard")
+    parser.add_argument("--test", "--ping", dest="test_connection", action="store_true", help="Test connection and credentials to ScanScribe server and exit")
+    parser.add_argument("--server", help="Server URL (e.g., http://192.168.1.100:8000)")
     parser.add_argument("--username", "-u", help="Username")
     parser.add_argument("--password", "-p", help="Password")
     parser.add_argument("--folder", "-f", help="Watch folder path")
     parser.add_argument("--config", help="Config file path", default=CONFIG_FILE)
     parser.add_argument("--no-interactive", action="store_true", help="Run in non-interactive mode")
+    parser.add_argument("--version", "-v", action="version", version=f"ScanScribe Uploader v{__version__}")
     
     args = parser.parse_args()
     
     # Initialize client
     client = ScanScribeClient(Path(args.config))
     
-    # Override config from args
+    # Override config from args if provided
     if args.server:
-        client.config["server_url"] = args.server
+        srv = args.server.rstrip("/")
+        if not srv.startswith("http://") and not srv.startswith("https://"):
+            srv = f"http://{srv}"
+        client.config["server_url"] = srv
+    if args.username:
+        client.config["username"] = args.username
+    if args.password:
+        client.config["password"] = args.password
     if args.folder:
         client.config["watch_folder"] = args.folder
+
+    # Handle --setup flag
+    if args.setup:
+        interactive_setup(client)
+        return
+
+    # Handle --test / --ping flag
+    if args.test_connection:
+        success = client.test_connection(verbose=True)
+        sys.exit(0 if success else 1)
     
     # Non-interactive mode (headless operation)
     if args.no_interactive:
@@ -814,11 +1071,12 @@ def main():
         password = args.password or client.config.get("password")
         
         if not username or not password:
-            print(f"{Colors.RED}❌ Username/password required for non-interactive mode{Colors.RESET}\n")
-            return
+            print(f"{Colors.RED}❌ Username/password required for non-interactive mode{Colors.RESET}")
+            print(f"{Colors.YELLOW}Run `python scanscribe_client_console.py --setup` to configure credentials first.{Colors.RESET}\n")
+            sys.exit(1)
         
         if not client.login(username, password):
-            return
+            sys.exit(1)
         
         # Non-interactive: auto-process existing files without prompt
         client.start_watching(prompt_existing=False)
@@ -852,14 +1110,18 @@ def main():
     else:
         # Check if first time or needs login
         if not client.config.get("username") or not client.config.get("password") or args.username or args.password:
-            if not interactive_login(client):
+            # If no username is configured, launch setup wizard
+            if not client.config.get("username"):
+                interactive_setup(client)
+                return
+            elif not interactive_login(client):
                 print(f"{Colors.RED}❌ Login failed. Exiting.{Colors.RESET}\n")
                 return
         else:
             # Try auto-login with saved credentials
             print(f"\n{Colors.CYAN}Connecting to {client.config['server_url']}...{Colors.RESET}")
             if not client.login():
-                print(f"{Colors.YELLOW}⚠️  Saved credentials invalid. Please login again.{Colors.RESET}")
+                print(f"{Colors.YELLOW}⚠️  Saved credentials invalid or server unreachable.{Colors.RESET}")
                 if not interactive_login(client):
                     print(f"{Colors.RED}❌ Login failed. Exiting.{Colors.RESET}\n")
                     return

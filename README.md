@@ -12,8 +12,18 @@ Console client that watches a folder and uploads audio files to a ScanScribe ser
 
 ```bash
 pip install -r requirements.txt
+
+# Run initial setup wizard (server URL, credentials, scanner watch folder)
 python scanscribe_client_console.py --setup
+
+# Fast connection check
+python scanscribe_client_console.py --test
+
+# Start watching (interactive menu)
 python scanscribe_client_console.py
+
+# Headless / background operation
+python scanscribe_client_console.py --no-interactive
 ```
 Configure the uploader client with the scanscribe config.yml.
 

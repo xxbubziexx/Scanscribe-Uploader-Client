@@ -54,11 +54,11 @@ pyinstaller \
 ### Give users:
 1. `ScanScribe-Client.exe`
 2. Quick start guide:
-   - Run EXE
-   - Enter server IP (http://192.168.10.120:8000)
-   - Login with credentials
-   - Choose watch folder
-   - Click "Start Watching"
+   - Run EXE (`ScanScribe-Client.exe --setup`)
+   - Enter ScanScribe server URL (e.g. `http://192.168.1.100:8000`)
+   - Login with ScanScribe credentials
+   - Choose scanner audio watch folder (e.g. `C:\ProScan\Recordings` or `C:\SDRTrunk\recordings`)
+   - Start watching
 
 ### User Workflow
 ```
