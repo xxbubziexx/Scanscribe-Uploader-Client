@@ -10,6 +10,7 @@ import json
 import signal
 import argparse
 import getpass
+import mimetypes
 from pathlib import Path
 from datetime import datetime
 import requests
@@ -426,32 +427,45 @@ class ScanScribeClient:
             min_seconds = server_config.get('reject_duration_min_seconds', 2.5)
             if min_seconds > 0:
                 duration = self._get_audio_duration(file_path)
-                if duration > 0 and duration < min_seconds:
+                if duration is None:
+                    # Incomplete or malformed: do not conflate this with "too
+                    # short". The server applies its own completeness gate, so
+                    # let it through rather than discarding a good recording.
+                    pass
+                elif duration < min_seconds:
                     return f"duration {duration:.1f}s < {min_seconds:.1f}s min"
         
         return None
     
     def _get_audio_duration(self, file_path):
-        """Get audio duration using mutagen (fast metadata read)."""
+        """
+        Get audio duration using mutagen (fast metadata read).
+
+        Returns the duration in seconds, or None when the file could not be
+        parsed at all. None is deliberately distinct from a short duration: an
+        unparseable file is usually incomplete, not genuinely short, and the two
+        must not be conflated by the rejection filter.
+        """
         if not MUTAGEN_AVAILABLE:
             self.log("⚠️  mutagen not installed - duration rejection disabled", "warning")
-            return 0.0
+            return None
         
         try:
             audio = mutagen.File(str(file_path))
             if audio and hasattr(audio.info, 'length'):
                 return float(audio.info.length)
-            else:
-                self.log(f"⚠️  Could not read duration: {file_path.name}", "warning")
+            self.log(f"⚠️  Could not read duration: {file_path.name}", "warning")
         except Exception as e:
-            self.log(f"⚠️  Duration read error: {str(e)}", "warning")
-        return 0.0
+            self.log(f"⚠️  Unparseable audio ({file_path.name}): {str(e)}", "warning")
+        return None
     
     def upload_file(self, file_path, retry_on_auth=True):
         """Upload file to ScanScribe server."""
         try:
+            # Send the real MIME type for the extension rather than assuming WAV
+            mime_type = mimetypes.guess_type(Path(file_path).name)[0] or 'application/octet-stream'
             with open(file_path, 'rb') as f:
-                files = {'file': (Path(file_path).name, f, 'audio/wav')}
+                files = {'file': (Path(file_path).name, f, mime_type)}
                 
                 response = requests.post(
                     f"{self.config['server_url']}/api/upload/audio",
@@ -593,13 +607,25 @@ class AudioFileHandler(FileSystemEventHandler):
     def on_modified(self, event):
         """Handle file modification (catches files still being written)."""
         self._handle_file_event(event)
-    
-    def _handle_file_event(self, event):
+
+    def on_moved(self, event):
+        """
+        Handle files renamed into the watched folder.
+
+        Recorders that write to a temp file and rename it into place emit a
+        MOVED_TO event, not CREATED. Without this handler those completes are
+        only picked up by the periodic existing-file scan.
+        """
+        if event.is_directory:
+            return
+        self._handle_file_event(event, path=event.dest_path)
+
+    def _handle_file_event(self, event, path=None):
         """Process file event."""
         if event.is_directory:
             return
-        
-        file_path = Path(event.src_path)
+
+        file_path = Path(path if path is not None else event.src_path)
         file_ext = file_path.suffix.lower()
         
         # Check if it's an audio file
